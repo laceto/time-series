@@ -1,0 +1,528 @@
+---
+title: "time series"
+author: "luigi aceto"
+date: "2/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(fpp3)
+library(GGally)
+```
+
+Questo progetto illustra alcuni principi e pratiche nel trattamento delle serie storiche.  
+Il dataset analizzato riporta il numero di viaggi in Australia dal 1998 al 2016 con osservazioni trimestrali, per Stato, Regione e motivo del viaggio.  
+L'Australia è composta da 8 stati, compreso quello riferito alla capitale Canberra.  
+
+```{r echo=FALSE, out.width='100%'}
+knitr::include_graphics('./timezones-australia.jpg')
+```
+
+Nel seguito, il nome degli stati è abbreviato con le seguenti sigle.  
+
+
+```{r}
+
+tourism <- tourism %>%
+  mutate(
+    State = recode(State,
+                   "Australian Capital Territory" = "ACT",
+                   "New South Wales" = "NSW",
+                   "Northern Territory" = "NT",
+                   "Queensland" = "QLD",
+                   "South Australia" = "SA",
+                   "Tasmania" = "TAS",
+                   "Victoria" = "VIC",
+                   "Western Australia" = "WA"
+    )
+  )
+
+```
+
+Il grafico successivo permette di dare una visione generale delle serie storiche sotto analisi raggruppate per Stato in cui il viaggio è stato effettuato indipendentemente dalle ragioni per il quale il viaggio è stato fatto.   
+
+
+```{r}
+visitors <- tourism %>%
+  group_by(State) %>%
+  summarise(Trips = sum(Trips))
+
+visitors %>%
+  ggplot(aes(x = Quarter, y = Trips)) +
+  geom_line() +
+  facet_grid(vars(State), scales = "free_y") +
+  labs(title = "Australian domestic tourism",
+       y= "Overnight trips ('000)")
+
+```
+
+Uno scatterplot permette di visualizzare le relazioni tra queste 8 serie storiche.  
+Principalmente sono riportate relazioni positive, con relazioni più forti tra gli stati confinanti situati nel sud e sud est (New South Wales, Victoria e South Australia).  
+
+Ci sono anche alcune relazioni negative tra Northern Territory e altri stati. Questo perchè Northen Territory è situato a nord ed è famoso per il suo deserto ed è visitato prevalentemente in inverno (Luglio) in contrasto con l'estate (Gennaio) per il resto dell'Australia. 
+
+```{r}
+
+visitors %>%
+  pivot_wider(values_from=Trips, names_from=State) %>%
+  GGally::ggpairs(columns = 2:9)
+```
+
+## Viaggi per vacanza  
+
+Una forte stagionalità è presente in ogni serie storia relativa ai viaggi per vacanza. I picchi stagionali tra gli stati non coincidono.  
+
+```{r}
+holidays <- tourism %>%
+  filter(Purpose == "Holiday") %>%
+  group_by(State) %>%
+  summarise(Trips = sum(Trips))
+
+holidays %>% 
+  autoplot(Trips) +
+  ylab("thousands of trips") + xlab("Year") +
+  ggtitle("Australian domestic holiday nights")
+```
+
+## Stagionalità    
+
+Il successivo season plot mette in chiaro che gli stati del sud dell'Australia (Tasmania, Victoria e South Australia) hanno il picco stagionale nel Q1 (la loro estate), mentre gli stati del nord (Queensland e Northern Terriory) hanno il loro picco nel Q3 (la stagione secca).  
+
+```{r}
+holidays %>% 
+  gg_season(Trips) +
+  ylab("thousands of trips") +
+  ggtitle("Australian domestic holiday nights")
+```
+## Sottoserie    
+
+Le corrispondenti sottoserie sono raffigurate nel grafico successivo.  
+Questo grafico evidenza inoltre che il turismo nel Western Australia ha subito un grande aumento negli anni recenti.  
+
+
+```{r}
+holidays %>%
+  gg_subseries(Trips) + 
+  ylab("thousands of trips") +
+  ggtitle("Australian domestic holiday nights")
+```
+ 
+## Lag plot  
+
+Il lag plot è uno scatterplot che rappresenta la serie storica contro la stessa serie ritardata. I colori in questo caso rappresentano i trimestri dell'anno quindi il periodo di stagionalità.  Un andamento lineare nei trimestri indica un certa correlazione.  
+
+Prendendo in considerazione lo stato della Tasmania, la relazione è fortemente positiva ai lag 4 e 8, riflettendo la forte stagionalità dei dati. La relazione negativa osservata per i ritardi 2 e 6 si verifica perché i picchi (in Q4) sono tracciati contro i minimi (in Q2).  
+
+```{r}
+holidays %>% 
+  dplyr::filter(State == "TAS") %>%
+  dplyr::group_split(State) %>%
+  purrr::map(gg_lag, Trips, geom = "point")
+```
+
+## Autocorrelazioni  
+
+Per definizione le autocorrelazioni misurano la relazione lineare tra valori ritardati della serie storica.  
+I coefficienti di correlazione per i viaggi per vacanza in Australia sono calcolati utilizzando la funzione ACF().  
+I valore in acf corrispondono ai coefficienti di correlazione relativi al grafico precedenti sempre considerando lo stato della Tasmania.  
+
+```{r}
+holidays %>%
+  dplyr::filter(State == "TAS") %>%
+  ACF(Trips, lag_max = 9)
+```
+
+Il correlogramma visualizza i valori acf e permette di vedere i cambi nella correlazione al variare dei lag.  
+
+In questo grafico il coefficiente al 4 ritardo è maggiore rispetto agli altri ritardi. Ciò è dovuto all'andamento stagionale dei dati: i picchi tendono a essere distanziati di quattro quarti e i minimi tendono a distare di quattro quarti.
+Il coefficiente al ritardo 2 è più negativo rispetto agli altri ritardi perché i minimi tendono ad essere due quarti indietro rispetto ai picchi.
+Le linee blu tratteggiate indicano se le correlazioni sono significativamente diverse da zero.
+
+```{r}
+holidays %>%
+  dplyr::filter(State == "TAS") %>%
+  ACF(Trips, lag_max = 48) %>%
+  autoplot()
+```
+
+Correlogramma per tutti gli stati  
+
+```{r}
+holidays %>%
+  ACF(Trips, lag_max = 48) %>%
+  autoplot()
+```
+
+## Decomposizione della serie storica  
+
+<!-- https://otexts.com/fpp3/components.html -->
+
+La funzione STL del pacchetto feasts decompone la serie storica nelle componenti di stagionalità, trend e componente residuale.  
+STL è l'acronimo di "Seasonal and Trend decomposition using Loess" mentre Loess è un metodo di stima per relazioni non lineari. Il metodo STL è stato sviluppato da R. B. Cleveland, Cleveland, McRae, & Terpenning (1990).  
+
+
+```{r}
+dcmp <- holidays %>% model(stl = STL(Trips)) %>% components()
+dcmp
+```
+La tabella riporta la componenti della decomposizione STL. I dati originali sono riportati nella colonna Trips, mentre la stima delle componenti della serie storia sono riportate di sequito.
+
+Tutte le serie storiche e tutte le componenti possono essere rappresentate graficamente con la funzione autoplot().   
+
+
+```{r}
+dcmp %>% autoplot()
+```
+
+Le 3 componenti sono rappresentate separatamente negli ultimi tre pannelli. Queste componenti possono essere sommate per ricostruire i dati riportati nel pannello superiore. 
+Se la componente stagionale è rimossa dai dati originali, i valori che si ottengono si dicono “seasonally adjusted” data.  
+
+```{r}
+dcmp %>%
+  dplyr::filter(State == "NT") %>%
+  as_tsibble() %>%
+  autoplot(Trips, colour = "gray") +
+  geom_line(aes(y=season_adjust), colour = "#0072B2") +
+  labs(
+    y = "Trips (thousands)",
+    title = "Total trips in Northern Territory
+")
+```
+
+La colonna trend, della tabelle sopra riportata, segue i movimenti complessivi della serie storica ignorando ogni fluttuazione dovuta alla stagionalità o fluttuazioni aleatorie come di seguito riportato nel grafico sottostante per lo stato del Western Australia.
+
+```{r}
+dcmp %>%
+  as_tsibble(index = Quarter) %>%
+  dplyr::filter(State == "WA") %>%
+  autoplot(Trips, colour="gray") +
+  geom_line(aes(y=trend), colour = "#D55E00") +
+  labs(
+    y = "Trips (thousands)",
+    title = "Total trips in Western Australia"
+  )
+```
+
+## Caratteristiche delle serie storiche per ogni motivo di viaggio    
+
+Il pacchetto **feasts** include delle funzioni per il calcolo di caratteristiche e statistiche per le serie storiche.  
+In totale, 48 nuove features vengono calcolate per le serie storiche.  
+
+```{r}
+tourism_features <- tourism %>%
+  features(Trips, feature_set(pkgs = "feasts"))
+tourism_features %>% names
+```
+Tutte queste caratteristiche (variabili) possono essere utilizzate in una PCA.  
+Il grafico successivo mette in relazione le prime due componenti principali calcolate a partire dalle caratteristiche (features) estratte dalle serie storiche al punto precedente.  
+
+Ogni punto nel grafico rappresenta una serie storica e la sua posizione è derivato dalle 48 features. Il grafico rivela che:  
+
+- la serie storica delle vacanze si comporta differentemente rispetto al resto delle altre serie. Quasi tutte le serie storiche delle vacanze si trovano nella parte più alta dei grafici mentre le altre serie rimangono nella parte inferiore del grafico.  
+
+Each point on Figure 4.4 represents one series and its location on the plot is based on all 48 features. The first principal component (.fittedPC1) is the linear combination of the features which explains the most variation in the data. The second principal component (.fittedPC2) is the linear combination which explains the next most variation in the data, while being uncorrelated with the first principal component. For more information about principal component dimension reduction, see Izenman (2008).
+
+Il grafico inoltre permette di individuare le serie storiche anomale. Queste anomailie sono individuabili in quei punti che sono separati dalla maggioranza  delle serie storiche.  
+
+
+```{r}
+library(broom)
+pcs <- tourism_features %>%
+  select(-State, -Region, -Purpose) %>%
+  prcomp(scale = TRUE) %>%
+  augment(tourism_features)
+pcs %>%
+  ggplot(aes(x = .fittedPC1, y = .fittedPC2, col = Purpose)) +
+  geom_point() +
+  theme(aspect.ratio = 1)
+```
+
+## Forecasting dei viaggi per vacanza   
+
+Il forecast del numero dei viaggi per vacanza è implementato utilizzando i principi del framework [**modeltime**](https://business-science.github.io/modeltime/).  
+Gli steps eseguiti per il forecasting sono i seguenti:  
+
+- split della serie storica in training e testing test utilizzando una proporzione del 90% per il training
+- fitting sui dati di training dei seguenti modelli:  
+- fitting dei modelli sui dati di testing  
+- calcolo di metriche 
+
+```{r, echo=FALSE, eval=FALSE}
+forecast_trip <- function(state) {
+  
+  ACT <- holidays %>%
+    dplyr::filter(State == state)
+  
+  train <- ACT %>%
+    filter_index("1998 Q1" ~ "2014 Q4")
+
+  # Fit the models
+  beer_fit <- train %>%
+    model(
+      Mean = MEAN(Trips),
+      `Naïve` = NAIVE(Trips),
+      `Seasonal naïve` = SNAIVE(Trips)
+      )
+  
+  # Generate forecasts for 14 quarters
+  beer_fc <- beer_fit %>% forecast(h = 12)
+  
+  # Plot forecasts against actual values
+  plots_pred <- beer_fc %>%
+    autoplot(train, level = NULL) +
+    autolayer(
+      filter_index(ACT, "2015 Q1" ~ .),
+      colour = "black"
+      ) +
+    labs(
+      y = "Trips",
+      title = paste0("Forecasts for quarterly trips in ", state)
+      ) +
+  guides(colour = guide_legend(title = "Forecast"))
+  
+  aug <- beer_fit %>%
+    augment()
+
+  plots_res <- autoplot(aug, .innov) + labs(y = "Trips",
+       title = paste0("Residuals from the quarterly trips in ", state))
+  
+  
+  hist_res <- aug %>% 
+    ggplot(aes(x = .innov)) +
+    geom_histogram() +
+    labs(title = paste0("Histogram of residuals ", state)) + 
+    facet_wrap( ~ .model)
+  
+  corr_res <- aug %>%
+    ACF(.innov, lag_max = 24) %>%
+    autoplot() +
+    labs(title = paste0("Correlogram of residuals ", state)) + 
+    facet_wrap( ~ .model)
+  
+  return(
+    list(
+      aug = aug,
+      plots_pred = plots_pred,
+      plots_res = plots_res,
+      hist_res = hist_res,
+      corr_res = corr_res
+    )
+  )
+
+}
+
+forecast_trip_results <- holidays %>%
+  dplyr::pull(State) %>%
+  unique() %>%
+  purrr::map(., forecast_trip)
+```
+
+```{r, figures-side, fig.show="hold", out.width="50%", results='hide', echo=FALSE, eval=FALSE}
+
+forecast_trip_results  %>% 
+  purrr::map(., "plots_pred")
+
+```
+
+```{r, figures-side2, fig.show="hold", out.width="50%", results='hide', echo=FALSE, eval=FALSE}
+
+forecast_trip_results  %>% 
+  purrr::map(., "plots_res")
+
+```
+
+```{r, figures-side3, fig.show="hold", out.width="50%", results='hide', echo=FALSE, eval=FALSE}
+
+forecast_trip_results  %>% 
+  purrr::map(., "hist_res")
+```
+
+```{r, figures-side4, fig.show="hold", out.width="50%", results='hide', echo=FALSE, eval=FALSE}
+
+forecast_trip_results  %>% 
+  purrr::map(., "corr_res")
+```
+
+```{r, echo=FALSE, eval=FALSE}
+holidays %>%
+    dplyr::filter(State == "ACT") %>%
+  gg_tsdisplay(difference(Trips, 12) %>% difference(),
+               plot_type='partial', lag=36) +
+  labs(title = "Double differenced", y="")
+
+fit <- holidays %>%
+    dplyr::filter(State == "ACT") %>%
+  model(
+    arima012011 = ARIMA(Trips ~ pdq(0,1,2) + PDQ(0,1,1)),
+    arima210011 = ARIMA(Trips ~ pdq(2,1,0) + PDQ(0,1,1)),
+    arima012112 = ARIMA(Trips ~ pdq(0,1,2) + PDQ(1,1,2)),
+    arima311011 = ARIMA(Trips ~ pdq(3,1,1) + PDQ(0,1,1)),
+    arima312011 = ARIMA(Trips ~ pdq(3,1,2) + PDQ(0,1,1)),
+    arima310011 = ARIMA(Trips ~ pdq(3,1,0) + PDQ(0,1,1)),
+    auto = ARIMA(Trips, stepwise = FALSE, approx = FALSE)
+  )
+fit %>% pivot_longer(arima012011:auto, names_to = "Model name",
+                     values_to = "Orders")
+
+glance(fit) %>% arrange(AICc) %>% select(.model:BIC)
+
+```
+
+```{r, echo=FALSE}
+library(xgboost)
+library(tidymodels)
+library(modeltime)
+library(tidyverse)
+library(lubridate)
+library(timetk)
+
+tidy_forecasting <- function(state){
+  
+  # This toggles plots from plotly (interactive) to ggplot (static)
+  interactive <- FALSE
+  
+  holiday_state <- holidays %>%
+    dplyr::filter(State == state) %>%
+    dplyr::rename(State = State, date = Quarter, value = Trips)
+  
+  holiday_state$date = as.Date(holiday_state$date)
+
+  # Split Data 90/10
+  splits <- initial_time_split(holiday_state, prop = 0.9)
+  
+  # Model 1: auto_arima ----
+  model_fit_arima_no_boost <- arima_reg() %>%
+    set_engine(engine = "auto_arima") %>%
+    fit(value ~ date, data = training(splits))
+  #> frequency = 12 observations per 1 year
+  
+  # Model 2: arima_boost ----
+  model_fit_arima_boosted <- arima_boost(
+    min_n = 2,
+    learn_rate = 0.02
+  ) %>%
+    set_engine(engine = "auto_arima_xgboost") %>%
+    fit(value ~ date + as.numeric(date) + factor(month(date, label = TRUE), ordered = F),
+        data = training(splits))
+  #> frequency = 12 observations per 1 year
+  
+  # Model 3: ets ----
+  model_fit_ets <- exp_smoothing() %>%
+    set_engine(engine = "ets") %>%
+    fit(value ~ date, data = training(splits))
+  #> frequency = 12 observations per 1 year
+  
+  # Model 4: prophet ----
+  model_fit_prophet <- prophet_reg() %>%
+    set_engine(engine = "prophet") %>%
+    fit(value ~ date, data = training(splits))
+  #> Disabling weekly seasonality. Run prophet with weekly.seasonality=TRUE to overrStatee this.
+  #> Disabling daily seasonality. Run prophet with daily.seasonality=TRUE to overrStatee this.
+  
+  # Model 5: lm ----
+  model_fit_lm <- linear_reg() %>%
+    set_engine("lm") %>%
+    fit(value ~ as.numeric(date) + factor(month(date, label = TRUE), ordered = FALSE),
+        data = training(splits))
+  
+  # Model 6: earth ----
+  model_spec_mars <- mars(mode = "regression") %>%
+    set_engine("earth") 
+  
+  # recipe_spec <- recipe(value ~ date, data = training(splits))
+  # # %>%
+  # #   step_date(date, features = "month", ordinal = FALSE) %>%
+  # #   step_mutate(date_num = as.numeric(date)) %>%
+  # #   step_normalize(date_num) %>%
+  # #   step_rm(date)
+  # 
+  # wflw_fit_mars <- workflow() %>%
+  #   add_recipe(recipe_spec) %>%
+  #   add_model(model_spec_mars) %>%
+  #   fit(training(splits))
+  # 
+  models_tbl <- modeltime_table(
+    model_fit_arima_no_boost,
+    model_fit_arima_boosted,
+    model_fit_ets,
+    model_fit_prophet,
+    model_fit_lm
+  )
+  
+  # models_tbl
+  
+  calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(new_data = testing(splits))
+  
+  calibration_tbl %>%
+    modeltime_accuracy() %>%
+    dplyr::mutate(State = state)
+    # table_modeltime_accuracy(.interactive = FALSE) %>%
+    # broom::tidy()
+  
+  # calibration_tbl %>%
+  #   modeltime_forecast(
+  #     new_data    = testing(splits),
+  #     actual_data = holiday_state,
+  #     keep_data   = TRUE
+  #   ) %>%
+  #   # group_by(.model_desc) %>%
+  #   plot_modeltime_forecast(
+  #     .facet_ncol  = 2,
+  #     .interactive = FALSE
+  #   )
+  
+
+  
+  
+}
+
+```
+
+Le metriche riportate nella tabella di summary delle previsioni sono:  
+
+- Mean absolute error  
+- Mean absolute percent error
+- Mean absolute scaled error
+- Symmetric mean absolute percentage error
+- Root mean squared error
+- R squared
+
+
+```{r, results='hide'}
+forecast_holidays <- holidays %>%
+  dplyr::pull(State) %>%
+  unique() %>%
+  purrr::map(., tidy_forecasting) %>%
+  dplyr::bind_rows() %>%
+  dplyr::relocate(State, .before = .model_id) %>%
+  dplyr::arrange(desc(rsq))
+
+```
+
+```{r}
+
+library(DT)
+forecast_holidays %>%
+  purrr::map_if(., is.numeric, round, 2) %>%
+  dplyr::bind_cols() %>%
+  datatable()
+
+```
+Se rsq e rmse sono rappresentati con uno scatterplot, si possono individuare i gruppi di modelli relativi alle 8 serie storiche.  
+
+Si osserva che i modelli che descrivono le serie storiche di:
+
+- TAS sono quelli che hanno una migliore perfomance in riferimento ad entrambe le metriche e si trovano nel quadrante superiore sinistro  
+- NT, QLD e VIC hanno gli stelli livelli di rsq, ma rmse molto diversi
+- WA, SA, NSW sequono con rsq and un livello compreso tra 60% e 75%, ma con rmse molto diversi
+- ACT hanno le performance peggiori su entrambe le metriche
+
+
+```{r}
+
+p <- ggplot(forecast_holidays, aes(rmse, rsq))
+p + geom_point(aes(colour = factor(State)))
+```
+
